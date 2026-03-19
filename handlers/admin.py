@@ -324,26 +324,7 @@ def get_districts_with_done_keyboard(selected):
     
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-# Функция сохранения монтажника
-def save_electrician(telegram_id, full_name, phone, districts, is_admin=False):
-    import sqlite3
-    import json
-    from config import DATABASE_PATH
-    from datetime import datetime
-    
-    conn = sqlite3.connect(DATABASE_PATH)
-    cursor = conn.cursor()
-    
-    districts_json = json.dumps(districts)
-    
-    cursor.execute('''
-        INSERT OR REPLACE INTO electricians 
-        (telegram_id, full_name, phone, districts, is_active, total_orders_taken, rating, joined_at, is_admin)
-        VALUES (?, ?, ?, ?, 1, 0, 0.0, ?, ?)
-    ''', (telegram_id, full_name, phone, districts_json, datetime.now(), 1 if is_admin else 0))
-    
-    conn.commit()
-    conn.close()
+
 
 
 
