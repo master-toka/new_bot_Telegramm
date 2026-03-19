@@ -16,14 +16,15 @@ class OrderStates(StatesGroup):
     waiting_for_cancel_confirmation = State()     # Ожидание подтверждения отмены
     waiting_for_review = State()                   # Ожидание отзыва (при низкой оценке)
 
-# Если нужны отдельные состояния для разных типов действий,
-# можно добавить дополнительные классы:
 
 class AdminStates(StatesGroup):
     """Состояния для административных действий"""
-    waiting_for_electrician_add = State()         # Добавление нового монтажника
+    waiting_for_electrician_add = State()         # Ожидание ID монтажника
+    waiting_for_electrician_name = State()        # Ожидание ФИО монтажника
+    waiting_for_electrician_phone = State()       # Ожидание телефона монтажника
     waiting_for_district_assign = State()         # Назначение районов монтажнику
     waiting_for_manual_order_assign = State()     # Ручное назначение заказа
+
 
 class ElectricianStates(StatesGroup):
     """Состояния для действий монтажника"""
