@@ -4,6 +4,7 @@ from aiogram.types import Message, CallbackQuery, ReplyKeyboardRemove
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from datetime import datetime
+import sqlite3
 
 from states.order_states import OrderStates
 from database.models import create_order, get_user, get_order, cancel_order
@@ -13,7 +14,7 @@ from keyboards.reply import (
     get_cancel_keyboard, get_rating_keyboard
 )
 from utils.helpers import format_order_for_group
-from config import GROUP_ID, DISTRICTS
+from config import GROUP_ID, DISTRICTS, DATABASE_PATH, ADMIN_CHAT_ID
 
 router = Router()
 
@@ -113,9 +114,6 @@ async def process_location(message: Message, state: FSMContext):
     
     await state.update_data(lat=lat, lon=lon, address="📍 Геолокация отправлена")
     
-    # Здесь можно добавить обратное геокодирование через API Яндекса
-    # Но пока просто сохраняем координаты
-    
     await confirm_order(message, state)
 
 @router.message(F.text, StateFilter(OrderStates.waiting_for_location))
@@ -203,7 +201,7 @@ async def confirm_order_callback(callback: CallbackQuery, state: FSMContext):
     
     # Получаем данные пользователя
     user = get_user(user_id)
-    customer_name = user[2] if user else "Клиент"
+    customer_name = user[2] if user else "Клиент"  # first_name
     
     order_text = format_order_for_group(
         order_id=order_id,
@@ -268,15 +266,15 @@ async def cancel_order_callback(callback: CallbackQuery, state: FSMContext):
     
     order = get_order(order_id)
     
-    if not order or order[3] != user_id:  # user_id в заказе (индекс может отличаться)
+    if not order or order[2] != user_id:  # user_id в заказе
         await callback.answer("Заказ не найден", show_alert=True)
         return
     
-    if order[8] == 'completed':  # status
+    if order[9] == 'completed':  # status
         await callback.answer("Заказ уже выполнен, отмена невозможна", show_alert=True)
         return
     
-    if order[8] == 'in_progress':
+    if order[9] == 'in_progress':
         await callback.message.edit_text(
             "⚠️ Мастер уже выехал. Точно отменить заказ?",
             reply_markup=get_cancel_keyboard(order_id)
