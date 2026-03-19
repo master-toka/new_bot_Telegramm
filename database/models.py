@@ -88,13 +88,17 @@ def add_user(user_id, username, first_name, phone=None):
     # Проверяем, есть ли уже пользователь
     cursor.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
     if cursor.fetchone():
-        conn.close()
-        return False
-    
-    cursor.execute('''
-        INSERT INTO users (user_id, username, first_name, phone, registered_at)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (user_id, username, first_name, phone, datetime.now()))
+        # Обновляем существующего
+        cursor.execute('''
+            UPDATE users 
+            SET username = ?, first_name = ?, phone = ?
+            WHERE user_id = ?
+        ''', (username, first_name, phone, user_id))
+    else:
+        cursor.execute('''
+            INSERT INTO users (user_id, username, first_name, phone, registered_at, total_orders)
+            VALUES (?, ?, ?, ?, ?, 0)
+        ''', (user_id, username, first_name, phone, datetime.now()))
     
     conn.commit()
     conn.close()
@@ -119,7 +123,8 @@ def add_electrician(telegram_id, full_name, phone, districts, is_admin=0):
     districts_json = json.dumps(districts)
     
     cursor.execute('''
-        INSERT INTO electricians (telegram_id, full_name, phone, districts, joined_at, is_admin)
+        INSERT OR REPLACE INTO electricians 
+        (telegram_id, full_name, phone, districts, joined_at, is_admin)
         VALUES (?, ?, ?, ?, ?, ?)
     ''', (telegram_id, full_name, phone, districts_json, datetime.now(), is_admin))
     
@@ -153,8 +158,7 @@ def create_order(user_id, district_id, description, address, photo_id=None, lat=
     conn = sqlite3.connect(DATABASE_PATH)
     cursor = conn.cursor()
     
-    # Генерируем номер заказа (дата + номер)
-    from datetime import datetime
+    # Генерируем номер заказа (YYMMDD-XXX)
     date_str = datetime.now().strftime("%y%m%d")
     
     # Получаем последний номер заказа за сегодня
@@ -195,12 +199,34 @@ def create_order(user_id, district_id, description, address, photo_id=None, lat=
     return order_id, order_number
 
 def get_order(order_id):
-    """Получение заказа по ID"""
+    """Получение заказа по ID с правильными данными пользователя"""
     conn = sqlite3.connect(DATABASE_PATH)
     cursor = conn.cursor()
     
+    # Явно указываем все поля для правильных индексов
     cursor.execute('''
-        SELECT o.*, u.username, u.first_name, u.phone 
+        SELECT 
+            o.order_id,           -- 0
+            o.order_number,        -- 1
+            o.user_id,             -- 2
+            o.district_id,         -- 3
+            o.description,         -- 4
+            o.photo_id,            -- 5
+            o.address,             -- 6
+            o.location_lat,        -- 7
+            o.location_lon,        -- 8
+            o.status,              -- 9
+            o.created_at,          -- 10
+            o.taken_by,            -- 11
+            o.taken_at,            -- 12
+            o.completed_at,        -- 13
+            o.cancelled_at,        -- 14
+            o.cancel_reason,       -- 15
+            o.client_rating,       -- 16
+            o.client_review,       -- 17
+            u.username,            -- 18
+            u.first_name,          -- 19
+            u.phone                -- 20
         FROM orders o
         LEFT JOIN users u ON o.user_id = u.user_id
         WHERE o.order_id = ?
@@ -310,7 +336,7 @@ def rate_order(order_id, user_id, rating, review=None):
         taken_by = cursor.fetchone()[0]
         
         if taken_by:
-            # Обновляем рейтинг монтажника (упрощенно)
+            # Обновляем рейтинг монтажника
             cursor.execute('''
                 UPDATE electricians 
                 SET rating = (rating + ?) / 2 
@@ -339,23 +365,29 @@ def get_user_orders(user_id, limit=5):
     conn.close()
     
     return orders
-    # Функция сохранения монтажника
-def save_electrician(telegram_id, full_name, phone, districts, is_admin=False):
-    import sqlite3
-    import json
-    from config import DATABASE_PATH
-    from datetime import datetime
-    
+
+def fetch_all(query, params=()):
+    """Получение всех записей из БД по запросу"""
     conn = sqlite3.connect(DATABASE_PATH)
     cursor = conn.cursor()
-    
-    districts_json = json.dumps(districts)
-    
-    cursor.execute('''
-        INSERT OR REPLACE INTO electricians 
-        (telegram_id, full_name, phone, districts, is_active, total_orders_taken, rating, joined_at, is_admin)
-        VALUES (?, ?, ?, ?, 1, 0, 0.0, ?, ?)
-    ''', (telegram_id, full_name, phone, districts_json, datetime.now(), 1 if is_admin else 0))
-    
+    cursor.execute(query, params)
+    results = cursor.fetchall()
+    conn.close()
+    return results
+
+def fetch_one(query, params=()):
+    """Получение одной записи из БД"""
+    conn = sqlite3.connect(DATABASE_PATH)
+    cursor = conn.cursor()
+    cursor.execute(query, params)
+    result = cursor.fetchone()
+    conn.close()
+    return result
+
+def execute_query(query, params=()):
+    """Выполнение запроса без возврата данных"""
+    conn = sqlite3.connect(DATABASE_PATH)
+    cursor = conn.cursor()
+    cursor.execute(query, params)
     conn.commit()
     conn.close()
