@@ -180,3 +180,170 @@ async def orders_today(message: Message):
         text += f"{emoji} #{order_number} {time_str} - {district_name}\n"
     
     await message.answer(text)
+# Добавьте в handlers/admin.py (после других импортов)
+from aiogram.fsm.context import FSMContext
+from aiogram.filters import StateFilter
+from aiogram.types import ReplyKeyboardRemove
+from states.order_states import AdminStates
+
+@router.message(Command("add_electrician"))
+async def add_electrician_start(message: Message, state: FSMContext):
+    """Начало добавления нового монтажника"""
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ Доступ запрещен")
+        return
+    
+    await message.answer(
+        "👷‍♂️ ДОБАВЛЕНИЕ НОВОГО МОНТАЖНИКА\n\n"
+        "Введите Telegram ID монтажника:\n"
+        "(узнать ID можно у @userinfobot)"
+    )
+    await state.set_state(AdminStates.waiting_for_electrician_add)
+
+@router.message(StateFilter(AdminStates.waiting_for_electrician_add))
+async def process_electrician_id(message: Message, state: FSMContext):
+    """Обработка ID монтажника"""
+    try:
+        telegram_id = int(message.text.strip())
+        await state.update_data(telegram_id=telegram_id)
+        
+        await message.answer(
+            "Введите ФИО монтажника:"
+        )
+        await state.set_state(AdminStates.waiting_for_electrician_name)
+    except ValueError:
+        await message.answer("❌ Некорректный ID. Введите число:")
+
+@router.message(StateFilter(AdminStates.waiting_for_electrician_name))
+async def process_electrician_name(message: Message, state: FSMContext):
+    """Обработка имени монтажника"""
+    full_name = message.text.strip()
+    await state.update_data(full_name=full_name)
+    
+    await message.answer(
+        "Введите номер телефона монтажника (например: +79140001122):"
+    )
+    await state.set_state(AdminStates.waiting_for_electrician_phone)
+
+@router.message(StateFilter(AdminStates.waiting_for_electrician_phone))
+async def process_electrician_phone(message: Message, state: FSMContext):
+    """Обработка телефона монтажника"""
+    phone = message.text.strip()
+    await state.update_data(phone=phone)
+    
+    # Показываем список районов для выбора
+    from keyboards.reply import get_districts_keyboard
+    
+    await message.answer(
+        "Выберите районы, в которых работает монтажник\n"
+        "(можно выбрать несколько, нажимая на кнопки):",
+        reply_markup=get_districts_keyboard()
+    )
+    await state.set_state(AdminStates.waiting_for_district_assign)
+
+@router.callback_query(StateFilter(AdminStates.waiting_for_district_assign))
+async def process_electrician_district(callback: CallbackQuery, state: FSMContext):
+    """Обработка выбора района для монтажника"""
+    data = await state.get_data()
+    selected_districts = data.get('selected_districts', [])
+    
+    if callback.data.startswith('district:'):
+        district_id = int(callback.data.split(':')[1])
+        
+        if district_id in selected_districts:
+            selected_districts.remove(district_id)
+            await callback.answer(f"Район убран из списка")
+        else:
+            selected_districts.append(district_id)
+            await callback.answer(f"Район добавлен")
+        
+        await state.update_data(selected_districts=selected_districts)
+        
+        # Показываем текущий выбор
+        district_names = [DISTRICTS.get(d, f"ID{d}") for d in selected_districts]
+        await callback.message.edit_text(
+            f"Выбранные районы: {', '.join(district_names) if district_names else 'пока нет'}\n\n"
+            f"Продолжайте выбирать или нажмите 'Готово':",
+            reply_markup=get_districts_with_done_keyboard(selected_districts)
+        )
+    
+    elif callback.data == "done_districts":
+        if not selected_districts:
+            await callback.answer("Выберите хотя бы один район!", show_alert=True)
+            return
+        
+        # Сохраняем монтажника в БД
+        data = await state.get_data()
+        telegram_id = data.get('telegram_id')
+        full_name = data.get('full_name')
+        phone = data.get('phone')
+        
+        # Сохраняем в БД
+        save_electrician(
+            telegram_id=telegram_id,
+            full_name=full_name,
+            phone=phone,
+            districts=selected_districts,
+            is_admin=False
+        )
+        
+        await callback.message.edit_text(
+            f"✅ Монтажник успешно добавлен!\n\n"
+            f"👤 {full_name}\n"
+            f"📞 {phone}\n"
+            f"🆔 {telegram_id}\n"
+            f"📍 Районы: {', '.join([DISTRICTS.get(d) for d in selected_districts])}"
+        )
+        await state.clear()
+        await callback.answer()
+
+# Вспомогательная клавиатура для выбора районов с кнопкой Готово
+def get_districts_with_done_keyboard(selected):
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    
+    buttons = []
+    row = []
+    
+    for district_id, district_name in DISTRICTS.items():
+        # Добавляем отметку, если район выбран
+        mark = "✅ " if district_id in selected else ""
+        button = InlineKeyboardButton(
+            text=f"{mark}{district_name}", 
+            callback_data=f"district:{district_id}"
+        )
+        row.append(button)
+        
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    
+    if row:
+        buttons.append(row)
+    
+    buttons.append([InlineKeyboardButton(text="✅ ГОТОВО", callback_data="done_districts")])
+    
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+# Функция сохранения монтажника
+def save_electrician(telegram_id, full_name, phone, districts, is_admin=False):
+    import sqlite3
+    import json
+    from config import DATABASE_PATH
+    from datetime import datetime
+    
+    conn = sqlite3.connect(DATABASE_PATH)
+    cursor = conn.cursor()
+    
+    districts_json = json.dumps(districts)
+    
+    cursor.execute('''
+        INSERT OR REPLACE INTO electricians 
+        (telegram_id, full_name, phone, districts, is_active, total_orders_taken, rating, joined_at, is_admin)
+        VALUES (?, ?, ?, ?, 1, 0, 0.0, ?, ?)
+    ''', (telegram_id, full_name, phone, districts_json, datetime.now(), 1 if is_admin else 0))
+    
+    conn.commit()
+    conn.close()
+
+
+
