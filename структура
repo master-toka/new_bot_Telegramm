@@ -1,0 +1,23 @@
+electrician_bot/
+├── bot.py                 # Главный файл запуска
+├── config.py              # Все токены и настройки
+├── database/
+│   ├── __init__.py
+│   ├── models.py          # Модели базы данных
+│   └── db.py              # Работа с БД
+├── handlers/
+│   ├── __init__.py
+│   ├── start.py           # /start и регистрация
+│   ├── order.py           # Создание заявки
+│   ├── group.py           # Обработка действий из группы
+│   ├── admin.py           # Команды для руководства
+│   └── callbacks.py       # Обработка всех кнопок
+├── keyboards/
+│   ├── __init__.py
+│   └── reply.py           # Все клавиатуры
+├── utils/
+│   ├── __init__.py
+│   └── helpers.py         # Вспомогательные функции
+└── states/
+    ├── __init__.py
+    └── order_states.py    # Состояния для заявки
