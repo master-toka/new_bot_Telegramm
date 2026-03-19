@@ -35,7 +35,7 @@ async def cmd_start(message: Message, state: FSMContext):
         await state.set_state("waiting_for_name")
     else:
         # Уже зарегистрирован
-        welcome_text = get_welcome_text(user[3])  # first_name
+        welcome_text = get_welcome_text(user[2])  # first_name из БД
         await message.answer(
             welcome_text,
             reply_markup=get_main_keyboard()
@@ -99,9 +99,10 @@ async def process_phone_contact(message: Message, state: FSMContext):
     phone = message.contact.phone_number
     user_id = message.from_user.id
     username = message.from_user.username or "no_username"
+    first_name = message.from_user.first_name or "Пользователь"
     
     data = await state.get_data()
-    name = data.get('name', message.from_user.first_name)
+    name = data.get('name', first_name)
     
     # Сохраняем пользователя в БД
     add_user(user_id, username, name, phone)
@@ -119,9 +120,10 @@ async def process_phone_skip(message: Message, state: FSMContext):
     """Пропуск ввода телефона"""
     user_id = message.from_user.id
     username = message.from_user.username or "no_username"
+    first_name = message.from_user.first_name or "Пользователь"
     
     data = await state.get_data()
-    name = data.get('name', message.from_user.first_name)
+    name = data.get('name', first_name)
     
     # Сохраняем пользователя в БД без телефона
     add_user(user_id, username, name)
@@ -152,17 +154,24 @@ async def my_orders(message: Message):
         return
     
     status_emoji = {
-        'new': '🟡',
-        'in_progress': '🔵',
-        'completed': '✅',
-        'cancelled': '❌'
+        'new': '🟡 НОВАЯ',
+        'in_progress': '🔵 В РАБОТЕ',
+        'completed': '✅ ВЫПОЛНЕНО',
+        'cancelled': '❌ ОТМЕНЕНО'
     }
     
     orders_text = "📋 Ваши последние заявки:\n\n"
     for order in orders:
         order_number, status, created_at, district_id = order
         district_name = DISTRICTS.get(district_id, "Неизвестный район")
-        date_str = datetime.strptime(created_at, '%Y-%m-%d %H:%M:%S.%f').strftime('%d.%m.%Y %H:%M')
+        
+        # Преобразуем строку даты в объект datetime
+        try:
+            created_date = datetime.strptime(created_at, '%Y-%m-%d %H:%M:%S.%f')
+            date_str = created_date.strftime('%d.%m.%Y %H:%M')
+        except:
+            date_str = str(created_at)
+        
         emoji = status_emoji.get(status, '⚪')
         
         orders_text += f"{emoji} Заявка #{order_number}\n"
