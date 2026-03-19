@@ -25,9 +25,9 @@ class AdminStates(StatesGroup):
     waiting_for_district_assign = State()         # Назначение районов монтажнику
     waiting_for_manual_order_assign = State()     # Ручное назначение заказа
 
-
 class ElectricianStates(StatesGroup):
     """Состояния для действий монтажника"""
     waiting_for_order_complete_confirm = State()  # Подтверждение завершения
     waiting_for_transfer_reason = State()         # Причина передачи заказа
+    waiting_for_transfer_reason_text = State()    # Текстовая причина передачи
     waiting_for_problem_report = State()          # Сообщение о проблеме
