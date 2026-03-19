@@ -1,15 +1,20 @@
 # handlers/admin.py
 from aiogram import Router, F
-from aiogram.types import Message
-from aiogram.filters import Command
+from aiogram.types import Message, CallbackQuery
+from aiogram.filters import Command, StateFilter
+from aiogram.fsm.context import FSMContext
 import sqlite3
 import json
+from datetime import datetime, timedelta
 
 from database.models import is_admin
 from config import DATABASE_PATH, DISTRICTS
-from datetime import datetime, timedelta
+from states.order_states import AdminStates
+from keyboards.reply import get_main_keyboard
 
 router = Router()
+
+# ================ СТАТИСТИКА ================
 
 @router.message(Command("stats"))
 async def admin_stats(message: Message):
@@ -18,9 +23,7 @@ async def admin_stats(message: Message):
         await message.answer("⛔ Доступ запрещен")
         return
     
-    # Статистика за сегодня
     today = datetime.now().date()
-    tomorrow = today + timedelta(days=1)
     
     conn = sqlite3.connect(DATABASE_PATH)
     cursor = conn.cursor()
@@ -51,21 +54,14 @@ async def admin_stats(message: Message):
     ''')
     new_orders = cursor.fetchone()[0]
     
-    # Заявки по районам
+    # Отмененные сегодня
     cursor.execute('''
-        SELECT district_id, COUNT(*) FROM orders 
-        WHERE DATE(created_at) = DATE(?) 
-        GROUP BY district_id
+        SELECT COUNT(*) FROM orders 
+        WHERE DATE(cancelled_at) = DATE(?) AND status = 'cancelled'
     ''', (today,))
-    districts_stats = cursor.fetchall()
+    cancelled_today = cursor.fetchone()[0]
     
     conn.close()
-    
-    # Формируем статистику по районам
-    districts_text = ""
-    for district_id, count in districts_stats:
-        district_name = DISTRICTS.get(district_id, f"Район {district_id}")
-        districts_text += f"  • {district_name}: {count}\n"
     
     stats_text = f"""
 📊 СТАТИСТИКА ЗА {today.strftime('%d.%m.%Y')}
@@ -73,66 +69,13 @@ async def admin_stats(message: Message):
 📌 ОБЩАЯ:
 • Всего заявок: {total_today}
 • Выполнено: {completed_today}
+• Отменено: {cancelled_today}
 • В работе сейчас: {in_progress}
 • Новые: {new_orders}
-
-📍 ПО РАЙОНАМ:
-{districts_text if districts_text else "  • Нет данных"}
     """
     
     await message.answer(stats_text)
 
-@router.message(Command("electricians"))
-async def electricians_list(message: Message):
-    """Список монтажников на смене"""
-    if not is_admin(message.from_user.id):
-        await message.answer("⛔ Доступ запрещен")
-        return
-    
-    conn = sqlite3.connect(DATABASE_PATH)
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-        SELECT telegram_id, full_name, phone, districts, total_orders_taken, rating, is_active 
-        FROM electricians 
-        ORDER BY total_orders_taken DESC
-    ''')
-    
-    electricians = cursor.fetchall()
-    conn.close()
-    
-    if not electricians:
-        await message.answer("Нет монтажников в базе данных")
-        return
-    
-    text = "👷‍♂️ СПИСОК МОНТАЖНИКОВ:\n\n"
-    
-    for e in electricians:
-        telegram_id, full_name, phone, districts_json, total_orders, rating, is_active = e
-        
-        # Парсим список районов
-        try:
-            districts = json.loads(districts_json) if districts_json else []
-            district_names = [DISTRICTS.get(d, f"ID{d}") for d in districts]
-            districts_str = ', '.join(district_names) if district_names else "Не назначены"
-        except:
-            districts_str = "Ошибка в данных"
-        
-        status = "✅ НА СМЕНЕ" if is_active else "💤 НЕ АКТИВЕН"
-        
-        text += f"👤 {full_name}\n"
-        text += f"  📞 {phone}\n"
-        text += f"  🆔 {telegram_id}\n"
-        text += f"  📍 Районы: {districts_str}\n"
-        text += f"  📊 Заказов: {total_orders} | ⭐ {rating:.1f}\n"
-        text += f"  {status}\n\n"
-    
-    # Разбиваем на части, если сообщение слишком длинное
-    if len(text) > 4000:
-        for i in range(0, len(text), 3500):
-            await message.answer(text[i:i+3500])
-    else:
-        await message.answer(text)
 
 @router.message(Command("orders_today"))
 async def orders_today(message: Message):
@@ -147,7 +90,8 @@ async def orders_today(message: Message):
     cursor = conn.cursor()
     
     cursor.execute('''
-        SELECT order_number, district_id, status, created_at, taken_by 
+        SELECT order_number, district_id, status, created_at, 
+               taken_by, completed_at 
         FROM orders 
         WHERE DATE(created_at) = DATE(?)
         ORDER BY created_at DESC
@@ -161,30 +105,125 @@ async def orders_today(message: Message):
         return
     
     status_emoji = {
-        'new': '🟡',
-        'in_progress': '🔵',
-        'completed': '✅',
-        'cancelled': '❌'
+        'new': '🟡 НОВАЯ',
+        'in_progress': '🔵 В РАБОТЕ',
+        'completed': '✅ ВЫПОЛНЕНО',
+        'cancelled': '❌ ОТМЕНЕНО'
     }
     
     text = f"📋 ЗАЯВКИ ЗА {today.strftime('%d.%m.%Y')}:\n\n"
     
     for order in orders:
-        order_number, district_id, status, created_at, taken_by = order
+        order_number, district_id, status, created_at, taken_by, completed_at = order
         district_name = DISTRICTS.get(district_id, "?")
-        emoji = status_emoji.get(status, '⚪')
+        status_text = status_emoji.get(status, status)
         
         # Форматируем время
-        time_str = datetime.strptime(created_at, '%Y-%m-%d %H:%M:%S.%f').strftime('%H:%M')
+        created_time = datetime.strptime(created_at, '%Y-%m-%d %H:%M:%S.%f').strftime('%H:%M')
         
-        text += f"{emoji} #{order_number} {time_str} - {district_name}\n"
+        text += f"#{order_number} {created_time} - {district_name}\n"
+        text += f"  {status_text}\n"
+        
+        if taken_by and status == 'completed' and completed_at:
+            complete_time = datetime.strptime(completed_at, '%Y-%m-%d %H:%M:%S.%f').strftime('%H:%M')
+            text += f"  ✅ Завершено в {complete_time}\n"
+        
+        text += "\n"
     
     await message.answer(text)
-# Добавьте в handlers/admin.py (после других импортов)
-from aiogram.fsm.context import FSMContext
-from aiogram.filters import StateFilter
-from aiogram.types import ReplyKeyboardRemove
-from states.order_states import AdminStates
+
+
+# ================ УПРАВЛЕНИЕ МОНТАЖНИКАМИ ================
+
+@router.message(Command("electricians"))
+async def electricians_list(message: Message):
+    """Список всех монтажников"""
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ Доступ запрещен")
+        return
+    
+    conn = sqlite3.connect(DATABASE_PATH)
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        SELECT telegram_id, full_name, phone, districts, total_orders_taken, rating, is_active, is_admin 
+        FROM electricians 
+        ORDER BY is_active DESC, total_orders_taken DESC
+    ''')
+    
+    electricians = cursor.fetchall()
+    conn.close()
+    
+    if not electricians:
+        await message.answer("Нет монтажников в базе данных")
+        return
+    
+    text = "👷‍♂️ СПИСОК МОНТАЖНИКОВ:\n\n"
+    
+    for e in electricians:
+        telegram_id, full_name, phone, districts_json, total_orders, rating, is_active, is_admin_flag = e
+        
+        # Парсим список районов
+        try:
+            districts = json.loads(districts_json) if districts_json else []
+            district_names = [DISTRICTS.get(d, f"ID{d}") for d in districts]
+            districts_str = ', '.join(district_names) if district_names else "Не назначены"
+        except:
+            districts_str = "Ошибка в данных"
+        
+        status = "✅ НА СМЕНЕ" if is_active else "💤 НЕ АКТИВЕН"
+        admin_status = "👑 АДМИН" if is_admin_flag else "🔧 МОНТАЖНИК"
+        
+        text += f"👤 {full_name}\n"
+        text += f"  📞 {phone}\n"
+        text += f"  🆔 {telegram_id}\n"
+        text += f"  📍 {districts_str}\n"
+        text += f"  📊 Заказов: {total_orders} | ⭐ {rating:.1f}\n"
+        text += f"  {admin_status} | {status}\n\n"
+    
+    # Разбиваем на части, если сообщение слишком длинное
+    if len(text) > 4000:
+        for i in range(0, len(text), 3500):
+            await message.answer(text[i:i+3500])
+    else:
+        await message.answer(text)
+
+
+@router.message(Command("active"))
+async def active_electricians(message: Message):
+    """Активные монтажники на смене"""
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ Доступ запрещен")
+        return
+    
+    conn = sqlite3.connect(DATABASE_PATH)
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        SELECT full_name, phone, total_orders_taken 
+        FROM electricians 
+        WHERE is_active = 1
+        ORDER BY total_orders_taken DESC
+    ''')
+    
+    active = cursor.fetchall()
+    conn.close()
+    
+    if not active:
+        await message.answer("Нет активных монтажников на смене")
+        return
+    
+    text = "✅ АКТИВНЫЕ МОНТАЖНИКИ:\n\n"
+    for e in active:
+        full_name, phone, total_orders = e
+        text += f"• {full_name}\n"
+        text += f"  📞 {phone}\n"
+        text += f"  📊 Заказов: {total_orders}\n\n"
+    
+    await message.answer(text)
+
+
+# ================ ДОБАВЛЕНИЕ НОВОГО МОНТАЖНИКА ================
 
 @router.message(Command("add_electrician"))
 async def add_electrician_start(message: Message, state: FSMContext):
@@ -200,6 +239,7 @@ async def add_electrician_start(message: Message, state: FSMContext):
     )
     await state.set_state(AdminStates.waiting_for_electrician_add)
 
+
 @router.message(StateFilter(AdminStates.waiting_for_electrician_add))
 async def process_electrician_id(message: Message, state: FSMContext):
     """Обработка ID монтажника"""
@@ -214,6 +254,7 @@ async def process_electrician_id(message: Message, state: FSMContext):
     except ValueError:
         await message.answer("❌ Некорректный ID. Введите число:")
 
+
 @router.message(StateFilter(AdminStates.waiting_for_electrician_name))
 async def process_electrician_name(message: Message, state: FSMContext):
     """Обработка имени монтажника"""
@@ -225,6 +266,7 @@ async def process_electrician_name(message: Message, state: FSMContext):
     )
     await state.set_state(AdminStates.waiting_for_electrician_phone)
 
+
 @router.message(StateFilter(AdminStates.waiting_for_electrician_phone))
 async def process_electrician_phone(message: Message, state: FSMContext):
     """Обработка телефона монтажника"""
@@ -232,14 +274,13 @@ async def process_electrician_phone(message: Message, state: FSMContext):
     await state.update_data(phone=phone)
     
     # Показываем список районов для выбора
-    from keyboards.reply import get_districts_keyboard
-    
     await message.answer(
         "Выберите районы, в которых работает монтажник\n"
         "(можно выбрать несколько, нажимая на кнопки):",
-        reply_markup=get_districts_keyboard()
+        reply_markup=get_districts_with_done_keyboard([])
     )
     await state.set_state(AdminStates.waiting_for_district_assign)
+
 
 @router.callback_query(StateFilter(AdminStates.waiting_for_district_assign))
 async def process_electrician_district(callback: CallbackQuery, state: FSMContext):
@@ -297,8 +338,11 @@ async def process_electrician_district(callback: CallbackQuery, state: FSMContex
         await state.clear()
         await callback.answer()
 
-# Вспомогательная клавиатура для выбора районов с кнопкой Готово
+
+# ================ ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ================
+
 def get_districts_with_done_keyboard(selected):
+    """Клавиатура для выбора районов с кнопкой Готово"""
     from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
     
     buttons = []
@@ -325,6 +369,18 @@ def get_districts_with_done_keyboard(selected):
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-
-
-
+def save_electrician(telegram_id, full_name, phone, districts, is_admin=False):
+    """Сохранение монтажника в БД"""
+    conn = sqlite3.connect(DATABASE_PATH)
+    cursor = conn.cursor()
+    
+    districts_json = json.dumps(districts)
+    
+    cursor.execute('''
+        INSERT OR REPLACE INTO electricians 
+        (telegram_id, full_name, phone, districts, is_active, total_orders_taken, rating, joined_at, is_admin)
+        VALUES (?, ?, ?, ?, 1, 0, 0.0, ?, ?)
+    ''', (telegram_id, full_name, phone, districts_json, datetime.now(), 1 if is_admin else 0))
+    
+    conn.commit()
+    conn.close()
