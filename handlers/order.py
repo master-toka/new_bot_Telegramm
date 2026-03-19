@@ -1,6 +1,7 @@
 # handlers/order.py
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, ReplyKeyboardRemove
+from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from datetime import datetime
 
@@ -8,7 +9,8 @@ from states.order_states import OrderStates
 from database.models import create_order, get_user, get_order, cancel_order
 from keyboards.reply import (
     get_main_keyboard, get_districts_keyboard, 
-    get_location_keyboard, get_confirmation_keyboard
+    get_location_keyboard, get_confirmation_keyboard,
+    get_cancel_keyboard, get_rating_keyboard
 )
 from utils.helpers import format_order_for_group
 from config import GROUP_ID, DISTRICTS
@@ -34,7 +36,10 @@ async def new_order_start(message: Message, state: FSMContext):
         reply_markup=get_districts_keyboard()
     )
 
-@router.callback_query(lambda c: c.data.startswith('district:'), OrderStates.waiting_for_district)
+@router.callback_query(
+    lambda c: c.data.startswith('district:'), 
+    StateFilter(OrderStates.waiting_for_district)
+)
 async def process_district(callback: CallbackQuery, state: FSMContext):
     """Обработка выбора района"""
     district_id = int(callback.data.split(':')[1])
@@ -54,7 +59,7 @@ async def process_district(callback: CallbackQuery, state: FSMContext):
     await state.set_state(OrderStates.waiting_for_description)
     await callback.answer()
 
-@router.message(OrderStates.waiting_for_description)
+@router.message(StateFilter(OrderStates.waiting_for_description))
 async def process_description(message: Message, state: FSMContext):
     """Обработка описания проблемы"""
     description = message.text.strip()
@@ -70,12 +75,12 @@ async def process_description(message: Message, state: FSMContext):
     await message.answer(
         "Теперь прикрепите фото проблемы, если есть.\n"
         "Это поможет мастеру оценить сложность работ.\n\n"
-        "Можно отправить фото сейчас или нажать 'Пропустить'.",
+        "Можно отправить фото сейчас или написать 'Пропустить'.",
         reply_markup=None
     )
     await state.set_state(OrderStates.waiting_for_photo)
 
-@router.message(F.photo, OrderStates.waiting_for_photo)
+@router.message(F.photo, StateFilter(OrderStates.waiting_for_photo))
 async def process_photo(message: Message, state: FSMContext):
     """Обработка фото"""
     photo_id = message.photo[-1].file_id
@@ -84,7 +89,7 @@ async def process_photo(message: Message, state: FSMContext):
     await message.answer("✅ Фото сохранено!")
     await ask_address(message, state)
 
-@router.message(F.text == "Пропустить", OrderStates.waiting_for_photo)
+@router.message(F.text.lower() == "пропустить", StateFilter(OrderStates.waiting_for_photo))
 async def skip_photo(message: Message, state: FSMContext):
     """Пропуск фото"""
     await state.update_data(photo_id=None)
@@ -100,7 +105,7 @@ async def ask_address(message: Message, state: FSMContext):
     )
     await state.set_state(OrderStates.waiting_for_location)
 
-@router.message(F.location, OrderStates.waiting_for_location)
+@router.message(F.location, StateFilter(OrderStates.waiting_for_location))
 async def process_location(message: Message, state: FSMContext):
     """Обработка геолокации"""
     lat = message.location.latitude
@@ -113,7 +118,7 @@ async def process_location(message: Message, state: FSMContext):
     
     await confirm_order(message, state)
 
-@router.message(F.text, OrderStates.waiting_for_location)
+@router.message(F.text, StateFilter(OrderStates.waiting_for_location))
 async def process_manual_address(message: Message, state: FSMContext):
     """Обработка ручного ввода адреса"""
     address = message.text.strip()
@@ -145,17 +150,7 @@ async def confirm_order(message: Message, state: FSMContext):
 Всё верно?
     """
     
-    # Создаем временную запись в БД или сохраняем данные для подтверждения
-    # Пока просто показываем кнопки
-    
-    await message.answer(
-        preview,
-        reply_markup=None,
-        parse_mode="HTML"
-    )
-    
-    # Здесь нужно создать заявку в БД с временным статусом или хранить данные в state
-    # Для простоты создаем сразу
+    # Создаем заявку в БД
     user_id = message.from_user.id
     district_id = data.get('district_id')
     description = data.get('description')
@@ -178,16 +173,33 @@ async def confirm_order(message: Message, state: FSMContext):
     await state.update_data(order_id=order_id, order_number=order_number)
     
     await message.answer(
+        preview,
+        reply_markup=get_confirmation_keyboard(order_id),
+        parse_mode="HTML"
+    )
+    await state.set_state(OrderStates.waiting_for_confirmation)
+
+@router.callback_query(
+    lambda c: c.data.startswith('confirm:'), 
+    StateFilter(OrderStates.waiting_for_confirmation)
+)
+async def confirm_order_callback(callback: CallbackQuery, state: FSMContext):
+    """Подтверждение заявки"""
+    data = await state.get_data()
+    order_id = data.get('order_id')
+    order_number = data.get('order_number')
+    
+    await callback.message.edit_text(
         f"✅ Заявка #{order_number} создана и отправлена мастерам!\n"
-        "Ожидайте, скоро с вами свяжутся.",
-        reply_markup=get_main_keyboard()
+        "Ожидайте, скоро с вами свяжутся."
     )
     
     # Отправляем заявку в группу монтажников
-    from aiogram import Bot
-    from keyboards.reply import get_group_order_keyboard
-    
-    bot = message.bot
+    user_id = callback.from_user.id
+    district_id = data.get('district_id')
+    description = data.get('description')
+    address = data.get('address')
+    photo_id = data.get('photo_id')
     
     # Получаем данные пользователя
     user = get_user(user_id)
@@ -203,21 +215,50 @@ async def confirm_order(message: Message, state: FSMContext):
         has_photo=bool(photo_id)
     )
     
+    from keyboards.reply import get_group_order_keyboard
+    
     if photo_id:
-        await bot.send_photo(
+        await callback.bot.send_photo(
             chat_id=GROUP_ID,
             photo=photo_id,
             caption=order_text,
             reply_markup=get_group_order_keyboard(order_id)
         )
     else:
-        await bot.send_message(
+        await callback.bot.send_message(
             chat_id=GROUP_ID,
             text=order_text,
             reply_markup=get_group_order_keyboard(order_id)
         )
     
     await state.clear()
+    await callback.answer()
+
+@router.callback_query(
+    lambda c: c.data.startswith('edit:'), 
+    StateFilter(OrderStates.waiting_for_confirmation)
+)
+async def edit_order_callback(callback: CallbackQuery, state: FSMContext):
+    """Редактирование заявки"""
+    await callback.message.edit_text(
+        "Давайте начнем заново. Выберите район:",
+        reply_markup=get_districts_keyboard()
+    )
+    await state.set_state(OrderStates.waiting_for_district)
+    await callback.answer()
+
+@router.callback_query(
+    lambda c: c.data.startswith('abort:'), 
+    StateFilter(OrderStates.waiting_for_confirmation)
+)
+async def abort_order_callback(callback: CallbackQuery, state: FSMContext):
+    """Отмена создания заявки"""
+    await callback.message.edit_text(
+        "❌ Создание заявки отменено.",
+        reply_markup=get_main_keyboard()
+    )
+    await state.clear()
+    await callback.answer()
 
 @router.callback_query(lambda c: c.data.startswith('cancel_order:'))
 async def cancel_order_callback(callback: CallbackQuery, state: FSMContext):
@@ -227,12 +268,12 @@ async def cancel_order_callback(callback: CallbackQuery, state: FSMContext):
     
     order = get_order(order_id)
     
-    if not order or order[3] != user_id:  # user_id в заказе
-        await callback.answer("Заказ не найден")
+    if not order or order[3] != user_id:  # user_id в заказе (индекс может отличаться)
+        await callback.answer("Заказ не найден", show_alert=True)
         return
     
     if order[8] == 'completed':  # status
-        await callback.answer("Заказ уже выполнен, отмена невозможна")
+        await callback.answer("Заказ уже выполнен, отмена невозможна", show_alert=True)
         return
     
     if order[8] == 'in_progress':
@@ -240,6 +281,8 @@ async def cancel_order_callback(callback: CallbackQuery, state: FSMContext):
             "⚠️ Мастер уже выехал. Точно отменить заказ?",
             reply_markup=get_cancel_keyboard(order_id)
         )
+        await state.set_state(OrderStates.waiting_for_cancel_confirmation)
+        await state.update_data(cancel_order_id=order_id)
     else:
         # Простая отмена нового заказа
         cancel_order(order_id, user_id)
@@ -253,4 +296,114 @@ async def cancel_order_callback(callback: CallbackQuery, state: FSMContext):
             f"❌ Заказ #{order[1]} отменен клиентом"
         )
     
+    await callback.answer()
+
+@router.callback_query(
+    lambda c: c.data.startswith('confirm_cancel:'), 
+    StateFilter(OrderStates.waiting_for_cancel_confirmation)
+)
+async def confirm_cancel_callback(callback: CallbackQuery, state: FSMContext):
+    """Подтверждение отмены заказа"""
+    data = await state.get_data()
+    order_id = data.get('cancel_order_id')
+    user_id = callback.from_user.id
+    
+    if order_id:
+        cancel_order(order_id, user_id, reason='client_cancelled_confirmed')
+        await callback.message.edit_text(
+            "✅ Заказ отменен"
+        )
+        
+        # Уведомление в группу
+        order = get_order(order_id)
+        if order:
+            await callback.bot.send_message(
+                GROUP_ID,
+                f"❌ Заказ #{order[1]} отменен клиентом (мастер уже выехал)"
+            )
+    
+    await state.clear()
+    await callback.answer()
+
+@router.callback_query(
+    lambda c: c.data.startswith('keep_order:'), 
+    StateFilter(OrderStates.waiting_for_cancel_confirmation)
+)
+async def keep_order_callback(callback: CallbackQuery, state: FSMContext):
+    """Оставить заказ (не отменять)"""
+    await callback.message.edit_text(
+        "✅ Заказ остается в работе. Спасибо!"
+    )
+    await state.clear()
+    await callback.answer()
+
+@router.callback_query(lambda c: c.data.startswith('rate:'))
+async def rate_order_callback(callback: CallbackQuery, state: FSMContext):
+    """Оценка заказа клиентом"""
+    parts = callback.data.split(':')
+    order_id = int(parts[1])
+    rating = int(parts[2])
+    user_id = callback.from_user.id
+    
+    from database.models import rate_order
+    success = rate_order(order_id, user_id, rating)
+    
+    if success:
+        if rating <= 3:
+            await callback.message.edit_text(
+                f"✅ Спасибо за оценку {rating}⭐!\n"
+                f"Нам очень жаль, что возникли проблемы.\n"
+                f"Напишите, пожалуйста, что пошло не так?"
+            )
+            await state.update_data(rate_order_id=order_id)
+            await state.set_state("waiting_for_review")
+        else:
+            await callback.message.edit_text(
+                f"✅ Спасибо за оценку {rating}⭐!\n"
+                f"Будем рады видеть вас снова!"
+            )
+            await state.clear()
+    else:
+        await callback.answer("❌ Ошибка при сохранении оценки", show_alert=True)
+    
+    await callback.answer()
+
+@router.message(StateFilter("waiting_for_review"))
+async def process_review(message: Message, state: FSMContext):
+    """Обработка отзыва при низкой оценке"""
+    data = await state.get_data()
+    order_id = data.get('rate_order_id')
+    review = message.text.strip()
+    
+    if order_id:
+        # Сохраняем отзыв в БД
+        conn = sqlite3.connect(DATABASE_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE orders SET client_review = ? WHERE order_id = ?",
+            (review, order_id)
+        )
+        conn.commit()
+        conn.close()
+        
+        # Уведомление руководству
+        await message.bot.send_message(
+            ADMIN_CHAT_ID,
+            f"⚠️ НИЗКАЯ ОЦЕНКА заказа #{order_id}\n"
+            f"Отзыв клиента: {review}"
+        )
+    
+    await message.answer(
+        "Спасибо за обратную связь! Мы обязательно учтем ваше замечание."
+    )
+    await state.clear()
+
+@router.callback_query(lambda c: c.data == "cancel_order")
+async def cancel_general(callback: CallbackQuery, state: FSMContext):
+    """Общая отмена (кнопка Отмена)"""
+    await callback.message.edit_text(
+        "Действие отменено.",
+        reply_markup=None
+    )
+    await state.clear()
     await callback.answer()
