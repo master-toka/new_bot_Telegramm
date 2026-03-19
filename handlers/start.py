@@ -1,13 +1,14 @@
 # handlers/start.py
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
-from aiogram.filters import CommandStart, Command
+from aiogram.filters import CommandStart, Command, StateFilter
 from aiogram.fsm.context import FSMContext
+from datetime import datetime
 
 from database.models import add_user, get_user, is_electrician, is_admin
 from keyboards.reply import get_main_keyboard, get_phone_keyboard
 from utils.helpers import get_welcome_text, get_help_text, get_districts_text
-from config import DISPATCHER_PHONE
+from config import COMPANY_NAME, DISPATCHER_PHONE
 
 router = Router()
 
@@ -75,7 +76,7 @@ async def urgent_button(message: Message):
         reply_markup=get_main_keyboard()
     )
 
-@router.message(state="waiting_for_name")
+@router.message(StateFilter("waiting_for_name"))
 async def process_name(message: Message, state: FSMContext):
     """Получение имени при регистрации"""
     name = message.text.strip()
@@ -92,7 +93,7 @@ async def process_name(message: Message, state: FSMContext):
     )
     await state.set_state("waiting_for_phone")
 
-@router.message(F.contact, state="waiting_for_phone")
+@router.message(F.contact, StateFilter("waiting_for_phone"))
 async def process_phone_contact(message: Message, state: FSMContext):
     """Получение номера телефона через контакт"""
     phone = message.contact.phone_number
@@ -113,7 +114,7 @@ async def process_phone_contact(message: Message, state: FSMContext):
         reply_markup=get_main_keyboard()
     )
 
-@router.message(F.text == "🔙 Пропустить", state="waiting_for_phone")
+@router.message(F.text == "🔙 Пропустить", StateFilter("waiting_for_phone"))
 async def process_phone_skip(message: Message, state: FSMContext):
     """Пропуск ввода телефона"""
     user_id = message.from_user.id
